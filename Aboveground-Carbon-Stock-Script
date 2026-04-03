@@ -48,7 +48,6 @@ var Forest_mask = ee.FeatureCollection(
 // 2. USER-DEFINED PARAMETERS
 // =============================================================
 
-//var Owner = "Casas de Máfil";
 var startDate = '2021-01-01';
 var endDate   = '2021-05-01';
 var Data_Scale = 10;
@@ -235,8 +234,8 @@ Map.addLayer(classFeatures, {color: 'red'}, 'Buffered field plots', false);
 
 Export.image.toDrive({
   image: CO2_Modeling_RF,
-  description: 'CO2_Modeling_RF_Casas_de_Mafil',
-  fileNamePrefix: 'CO2_Modeling_RF_Casas_de_Mafil',
+  description: 'CO2_Modeling_RF',
+  fileNamePrefix: 'CO2_Modeling',
   region: studyArea,
   scale: 10,
   maxPixels: 1e12
