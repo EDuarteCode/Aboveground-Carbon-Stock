@@ -30,14 +30,3 @@ The script implements the following steps:
 - Export of results  
 
 ---
-
-## 🛰️ Data Requirements
-
-This workflow is designed for:
-
-- Sentinel-2 imagery (Google Earth Engine)
-- Field plot carbon measurements
-- Study area boundary layers
-- Forest mask (optional but recommended)
-
-
