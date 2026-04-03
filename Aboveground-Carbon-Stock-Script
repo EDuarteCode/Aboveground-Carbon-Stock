@@ -1,0 +1,243 @@
+/***************************************************************
+/***************************************************************
+Supplementary Script S1
+
+Example Google Earth Engine workflow for carbon stock modeling 
+using Sentinel-2 imagery and field plot data.
+
+This script is provided as an example to illustrate the modeling 
+workflow used in this study. Due to data confidentiality agreements 
+and landowner privacy restrictions, some of the original input 
+datasets cannot be publicly shared. Therefore, this example uses 
+representative datasets to demonstrate the methodology and processing 
+steps.
+
+Access to the original datasets may be granted upon reasonable request, 
+subject to data-sharing agreements.
+
+This script includes:
+1) Sentinel-2 image preprocessing
+2) Spectral index calculation
+3) Random Forest model training
+4) Carbon stock prediction
+5) Map visualization and export
+***************************************************************/
+
+
+// =============================================================
+// 1. REQUIRED INPUT DATASETS
+// =============================================================
+
+// Field plots with observed carbon stock (tC ha-1)
+var Plots = ee.FeatureCollection(
+  "users/efrainduarte/Lagos/Example/Plots"
+);
+
+// Site 2 land-use layer
+var Site_example = ee.FeatureCollection(
+  "users/efrainduarte/Lagos/Example/Uso"
+);
+
+// Forest mask
+var Forest_mask = ee.FeatureCollection(
+  "users/efrainduarte/Lagos/Example/Forest"
+);
+
+
+// =============================================================
+// 2. USER-DEFINED PARAMETERS
+// =============================================================
+
+//var Owner = "Casas de Máfil";
+var startDate = '2021-01-01';
+var endDate   = '2021-05-01';
+var Data_Scale = 10;
+var buffer = 12;
+var Column_Name = 'tC_ha';
+var nTrees = 100;
+
+
+// =============================================================
+// 3. DEFINE STUDY AREA
+// =============================================================
+
+var studyArea = Site_example
+  .filterMetadata("Uso", "equals", "Bosque")
+  .geometry();
+
+
+// =============================================================
+// 4. FUNCTION TO COMPUTE SPECTRAL INDICES
+// =============================================================
+
+function addIndices(img) {
+
+  var ndvi = img.normalizedDifference(['B8', 'B4']).rename('NDVI');
+  var ndwi = img.normalizedDifference(['B3', 'B8']).rename('NDWI');
+
+  var evi = img.expression(
+    '2.5 * ((NIR - RED) / (NIR + 6 * RED - 7.5 * BLUE + 1))', {
+      'NIR': img.select('B8'),
+      'RED': img.select('B4'),
+      'BLUE': img.select('B2')
+    }).rename('EVI').float();
+
+  var savi = img.expression(
+    '(NIR - RED) * (1 + 0.5) / (NIR + RED + 0.5)', {
+      'NIR': img.select('B8'),
+      'RED': img.select('B4')
+    }).rename('SAVI').float();
+
+  var ibi_a = img.expression(
+    '2 * SWIR1 / (SWIR1 + NIR)', {
+      'SWIR1': img.select('B11'),
+      'NIR': img.select('B8')
+    }).rename('IBI_A');
+
+  var ibi_b = img.expression(
+    '(NIR / (NIR + RED)) + (GREEN / (GREEN + SWIR1))', {
+      'NIR': img.select('B8'),
+      'RED': img.select('B4'),
+      'GREEN': img.select('B3'),
+      'SWIR1': img.select('B11')
+    }).rename('IBI_B');
+
+  var ibi = ibi_a.addBands(ibi_b)
+    .normalizedDifference(['IBI_A', 'IBI_B'])
+    .rename('IBI')
+    .float();
+
+  var bsi = img.expression(
+    '((SWIR1 + RED) - (NIR + BLUE)) / ((SWIR1 + RED) + (NIR + BLUE))', {
+      'SWIR1': img.select('B11'),
+      'RED': img.select('B4'),
+      'NIR': img.select('B8'),
+      'BLUE': img.select('B2')
+    }).rename('BSI').float();
+
+  return img.addBands([ndvi, ndwi, evi, savi, ibi, bsi]);
+}
+
+
+// =============================================================
+// 5. FUNCTION TO MASK CLOUDS USING QA60
+// =============================================================
+
+function maskS2clouds(image) {
+  var qa = image.select('QA60');
+
+  var cloudBitMask = 1 << 10;
+  var cirrusBitMask = 1 << 11;
+
+  var mask = qa.bitwiseAnd(cloudBitMask).eq(0)
+    .and(qa.bitwiseAnd(cirrusBitMask).eq(0));
+
+  return image
+    .updateMask(mask)
+    .clip(studyArea)
+    .copyProperties(image, ['system:time_start']);
+}
+
+
+// =============================================================
+// 6. BUILD THE SENTINEL-2 COLLECTION
+// =============================================================
+
+var collection = ee.ImageCollection('COPERNICUS/S2')
+  .filterBounds(studyArea)
+  .filterDate(startDate, endDate)
+  .filter(ee.Filter.lt('CLOUDY_PIXEL_PERCENTAGE', 40))
+  .map(maskS2clouds)
+  .map(addIndices);
+
+print('Number of Sentinel-2 images:', collection.size());
+
+var Owner = "Casas de Máfil";
+// =============================================================
+// 7. BUILD THE MEDIAN COMPOSITE
+// =============================================================
+
+var Mosaic_full = collection.median();
+var Mosaic_Forestry = Mosaic_full.clip(Forest_mask);
+var Mosaic_Forestry_Owner = Mosaic_full.clip(studyArea);
+
+var stack = Mosaic_Forestry_Owner;
+var predictionBands = stack.bandNames();
+
+
+
+// =============================================================
+// 8. PREPARE FIELD PLOTS
+// =============================================================
+
+var classFeatures = Plots.filterMetadata("Propietari", "equals", Owner);
+
+classFeatures = classFeatures.map(function(f) {
+  return f.buffer(buffer, 10);
+});
+
+
+
+// =============================================================
+// 9. EXTRACT TRAINING SAMPLES
+// =============================================================
+
+var trainingSamples = stack.sampleRegions({
+  collection: classFeatures,
+  properties: [Column_Name],
+  scale: Data_Scale,
+  tileScale: 16,
+  geometries: true
+});
+
+
+// =============================================================
+// 10. TRAIN RANDOM FOREST MODEL
+// =============================================================
+
+var classifier_RF = ee.Classifier.smileRandomForest(nTrees)
+  .setOutputMode('REGRESSION')
+  .train(trainingSamples, Column_Name, predictionBands);
+
+
+// =============================================================
+// 11. GENERATE CARBON STOCK MAP
+// =============================================================
+
+var CO2_Modeling_RF = stack.classify(classifier_RF).rename("CO2_Modeling_RF");
+
+
+// =============================================================
+// 12. MAP DISPLAY
+// =============================================================
+
+var vizRGB = {
+  bands: ['B4', 'B3', 'B2'],
+  min: 0,
+  max: 2000
+};
+
+var carbonViz = {
+  min: 50,
+  max: 500,
+  palette: ['yellow', 'GreenYellow', 'DarkGreen']
+};
+
+Map.centerObject(studyArea, 12);
+Map.addLayer(Mosaic_Forestry_Owner, vizRGB, 'Sentinel-2 median composite');
+Map.addLayer(CO2_Modeling_RF, carbonViz, 'Carbon stock map (RF)', true);
+Map.addLayer(classFeatures, {color: 'red'}, 'Buffered field plots', false);
+
+
+// =============================================================
+// 13. EXPORT FINAL CARBON MAP
+// =============================================================
+
+Export.image.toDrive({
+  image: CO2_Modeling_RF,
+  description: 'CO2_Modeling_RF_Casas_de_Mafil',
+  fileNamePrefix: 'CO2_Modeling_RF_Casas_de_Mafil',
+  region: studyArea,
+  scale: 10,
+  maxPixels: 1e12
+});
